@@ -16,8 +16,7 @@
   "crons": [
     {
       "path": "/api/search/consume",
-      "schedule": "0 10 * * *",
-      "method": "POST"
+      "schedule": "0 10 * * *"
     }
   ]
 }
