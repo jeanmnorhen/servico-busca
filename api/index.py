@@ -97,7 +97,7 @@ def reindex():
             stats[collection_name] = {"error": str(e)}
     return jsonify({"status": "Reindexação concluída", "details": stats}), 200
 
-@app.route('/api/search/consume', methods=['POST'])
+@app.route('/api/search/consume', methods=['POST', 'GET'])
 def consume_events():
     # 1. Segurança: Protege o endpoint com um token secreto
     auth_header = request.headers.get('Authorization')
