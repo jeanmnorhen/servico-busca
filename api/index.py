@@ -3,7 +3,7 @@ import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from elasticsearch import Elasticsearch
-from confluent_kafka import Consumer, KafkaException
+from confluent_kafka  import Consumer, KafkaException
 
 try:
     import firebase_admin
