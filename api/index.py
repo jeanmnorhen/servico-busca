@@ -48,7 +48,7 @@ except Exception as e:
 
 # --- API Routes ---
 
-@app.route('/api/search', methods=['GET'])
+@app.route('/api/search', methods=['GET', 'OPTIONS'])
 def search():
     if not es:
         return jsonify({"error": "Elasticsearch não está inicializado."}), 503
