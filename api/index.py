@@ -14,6 +14,11 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
+# --- Variáveis globais para erros de inicialização ---
+firebase_init_error = None
+es_init_error = None
+kafka_consumer_init_error = None
+
 # --- Firebase Admin SDK Initialization ---
 db = None
 if firebase_admin:
@@ -29,9 +34,13 @@ if firebase_admin:
             db = firestore.client()
             print("Firebase Admin SDK inicializado com sucesso.")
         else:
-            print("Variável FIREBASE_ADMIN_SDK_BASE64 não encontrada para reindexação.")
+            firebase_init_error = "Variável FIREBASE_ADMIN_SDK_BASE64 não encontrada para reindexação."
+            print(firebase_init_error)
     except Exception as e:
+        firebase_init_error = str(e)
         print(f"Erro ao inicializar Firebase para reindexação: {e}")
+else:
+    firebase_init_error = "Biblioteca firebase_admin não encontrada."
 
 # --- Elasticsearch Configuration ---
 es = None
@@ -42,9 +51,37 @@ try:
         es = Elasticsearch(hosts=[es_host_url], api_key=es_api_key)
         print("Elasticsearch inicializado com sucesso via ELASTIC_HOST.")
     else:
-        print("Variáveis de ambiente para conexão cloud com Elasticsearch não encontradas.")
+        es_init_error = "Variáveis de ambiente para conexão cloud com Elasticsearch não encontradas."
+        print(es_init_error)
 except Exception as e:
+    es_init_error = str(e)
     print(f"Erro ao inicializar Elasticsearch: {e}")
+
+# --- Kafka Consumer Configuration ---
+kafka_consumer_instance = None
+if Consumer:
+    try:
+        kafka_conf = {
+            'bootstrap.servers': os.environ.get('KAFKA_BOOTSTRAP_SERVER'),
+            'group.id': 'search_service_group_cron_v2', # Novo group.id para garantir que ele leia eventos não lidos
+            'auto.offset.reset': 'earliest',
+            'security.protocol': 'SASL_SSL',
+            'sasl.mechanisms': 'PLAIN',
+            'sasl.username': os.environ.get('KAFKA_API_KEY'),
+            'sasl.password': os.environ.get('KAFKA_API_SECRET')
+        }
+        if kafka_conf['bootstrap.servers']:
+            kafka_consumer_instance = Consumer(kafka_conf)
+            kafka_consumer_instance.subscribe(['eventos_usuarios', 'eventos_produtos', 'eventos_lojas', 'eventos_ofertas'])
+            print("Consumidor Kafka inicializado com sucesso.")
+        else:
+            kafka_consumer_init_error = "Variáveis de ambiente do Kafka não encontradas para o consumidor."
+            print(kafka_consumer_init_error)
+    except Exception as e:
+        kafka_consumer_init_error = str(e)
+        print(f"Erro ao inicializar Consumidor Kafka: {e}")
+else:
+    kafka_consumer_init_error = "Biblioteca confluent_kafka não encontrada."
 
 # --- API Routes ---
 
@@ -105,26 +142,13 @@ def consume_events():
     if not cron_secret or auth_header != f'Bearer {cron_secret}':
         return jsonify({"error": "Unauthorized"}), 401
 
-    # 2. Configuração do Consumidor Kafka
-    kafka_conf = {
-        'bootstrap.servers': os.environ.get('KAFKA_BOOTSTRAP_SERVER'),
-        'group.id': 'search_service_group_cron_v2', # Novo group.id para garantir que ele leia eventos não lidos
-        'auto.offset.reset': 'earliest',
-        'security.protocol': 'SASL_SSL',
-        'sasl.mechanisms': 'PLAIN',
-        'sasl.username': os.environ.get('KAFKA_API_KEY'),
-        'sasl.password': os.environ.get('KAFKA_API_SECRET')
-    }
-    try:
-        consumer = Consumer(kafka_conf)
-        consumer.subscribe(['eventos_usuarios', 'eventos_produtos', 'eventos_lojas', 'eventos_ofertas'])
-    except Exception as e:
-        return jsonify({"error": f"Falha ao inicializar consumidor Kafka: {e}"}), 500
+    if not kafka_consumer_instance:
+        return jsonify({"error": "Kafka consumer not initialized.", "details": kafka_consumer_init_error}), 503
 
     # 3. Lógica de Consumo
     messages_processed = 0
     try:
-        msgs = consumer.consume(num_messages=20, timeout=5.0) # Consome até 20 mensagens ou por 5 segundos
+        msgs = kafka_consumer_instance.consume(num_messages=20, timeout=5.0) # Consome até 20 mensagens ou por 5 segundos
         if not msgs:
             return jsonify({"status": "No new messages to process"}), 200
 
@@ -148,29 +172,59 @@ def consume_events():
     except Exception as e:
         return jsonify({"error": f"Erro durante o consumo de eventos: {e}"}), 500
     finally:
-        consumer.close()
+        # O consumidor não deve ser fechado aqui se for uma instância global
+        # kafka_consumer_instance.close() # Removido
+        pass
 
     return jsonify({"status": "ok", "messages_processed": messages_processed}), 200
 
-# --- Health Check ---
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    # Health check for Elasticsearch
-    es_status = "error"
-    if es and es.ping():
-        es_status = "ok"
-
-    # Health check for Firebase
-    fs_status = "ok" if db else "error"
-
-    # Consolidate status
-    status = {
-        "elasticsearch": es_status,
-        "firestore": fs_status
+def get_health_status():
+    env_vars = {
+        "FIREBASE_ADMIN_SDK_BASE64": "present" if os.environ.get('FIREBASE_ADMIN_SDK_BASE64') else "missing",
+        "ELASTIC_HOST": "present" if os.environ.get('ELASTIC_HOST') else "missing",
+        "ELASTIC_API_KEY": "present" if os.environ.get('ELASTIC_API_KEY') else "missing",
+        "KAFKA_BOOTSTRAP_SERVER": "present" if os.environ.get('KAFKA_BOOTSTRAP_SERVER') else "missing",
+        "KAFKA_API_KEY": "present" if os.environ.get('KAFKA_API_KEY') else "missing",
+        "KAFKA_API_SECRET": "present" if os.environ.get('KAFKA_API_SECRET') else "missing"
     }
 
-    # Determine overall HTTP status
-    all_ok = all(s == "ok" for s in status.values())
+    es_status = "error"
+    if es:
+        try:
+            if es.ping():
+                es_status = "ok"
+            else:
+                es_status = "error (ping failed)"
+        except Exception as e:
+            es_status = f"error ({e})"
+    else:
+        es_status = "error (not initialized)"
+
+    status = {
+        "environment_variables": env_vars,
+        "dependencies": {
+            "firestore": "ok" if db else "error",
+            "elasticsearch": es_status,
+            "kafka_consumer": "ok" if kafka_consumer_instance else "error"
+        },
+        "initialization_errors": {
+            "firestore": firebase_init_error,
+            "elasticsearch": es_init_error,
+            "kafka_consumer": kafka_consumer_init_error
+        }
+    }
+    return status
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    status = get_health_status()
+    
+    all_ok = (
+        all(value == "present" for value in status["environment_variables"].values()) and
+        status["dependencies"]["firestore"] == "ok" and
+        status["dependencies"]["elasticsearch"] == "ok" and
+        status["dependencies"]["kafka_consumer"] == "ok"
+    )
     http_status = 200 if all_ok else 503
     
     return jsonify(status), http_status
