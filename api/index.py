@@ -155,11 +155,24 @@ def consume_events():
 # --- Health Check ---
 @app.route('/api/health', methods=['GET'])
 def health_check():
+    # Health check for Elasticsearch
     es_status = "error"
     if es and es.ping():
         es_status = "ok"
-    status = {"elasticsearch": es_status}
-    http_status = 200 if es_status == "ok" else 503
+
+    # Health check for Firebase
+    fs_status = "ok" if db else "error"
+
+    # Consolidate status
+    status = {
+        "elasticsearch": es_status,
+        "firestore": fs_status
+    }
+
+    # Determine overall HTTP status
+    all_ok = all(s == "ok" for s in status.values())
+    http_status = 200 if all_ok else 503
+    
     return jsonify(status), http_status
 
 if __name__ == '__main__':
